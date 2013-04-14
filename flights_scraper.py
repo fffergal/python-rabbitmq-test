@@ -15,6 +15,8 @@ arg_parser.add_argument('return_date', help='Return date as YYMMDD',
                         nargs='?')
 arg_parser.add_argument('--details', action='store_true', 
                         help='Show flight details as JSON')
+arg_parser.add_argument('--rabbitmq', action='store_true', 
+                        help='Report to local RabbitMQ')
 arg_parser.add_argument('--lowest', action='store_true', 
                         help='Show lowest price at end of output. '
                         'Useful for validation by cross referencing '
@@ -49,7 +51,8 @@ quotes = dictify(data['Quotes'])
 carriers = dictify(data['Carriers'])
 stations = dictify(data['Stations'])
 
-reporter = flights_reporter.Reporter(args.details, carriers, stations)
+reporter = flights_reporter.Reporter(
+    carriers, stations, details=args.details, rabbitmq=args.rabbitmq)
 
 # Calculating prices will need to be done a few times
 def get_price(pricing_option):
