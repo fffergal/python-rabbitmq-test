@@ -4,6 +4,7 @@ import argparse
 import urllib
 import re
 import json
+import flights_reporter
 
 arg_parser = argparse.ArgumentParser(description='Get flight info.')
 arg_parser.add_argument('from_airport', help='From airport')
@@ -45,8 +46,10 @@ def dictify(things):
 inbounds = dictify(data['InboundItineraryLegs'])
 outbounds = dictify(data['OutboundItineraryLegs'])
 quotes = dictify(data['Quotes'])
-stations = dictify(data['Stations'])
 carriers = dictify(data['Carriers'])
+stations = dictify(data['Stations'])
+
+reporter = flights_reporter.Reporter(args.details, carriers, stations)
 
 # Calculating prices will need to be done a few times
 def get_price(pricing_option):
@@ -56,22 +59,6 @@ def get_price(pricing_option):
         quote = quotes[quote_id]
         price += float(quote['Price'])
     return price
-
-def leg_detail_dict(leg):
-    output = {}
-    output['depart'] = leg['DepartureDateTime']
-    output['arrive'] = leg['ArrivalDateTime']
-    output['carriers'] = []
-    global carriers
-    for carrier in leg['MarketingCarrierIds']:
-        output['carriers'].append(carriers[carrier]['Name'])
-    # Some results have StopsCount > 0 but still no StopIds, weird
-    if (leg['StopsCount'] and 'StopIds' in leg):
-        output['stops'] = []
-        global stations
-        for stop in leg['StopIds']:
-            output['stops'].append(stations[stop]['Name'])
-    return output
 
 # Figuring if it's the min price can be done a lot
 min_price = None
@@ -88,7 +75,6 @@ if (args.return_date):
             if ('OpposingLegId' not in pricing_option):
                 inbound_singles.append([inbound, pricing_option])
 
-# Reporting for return flights
 # Loop over outbound, match their price options with inbound
 for outbound in data['OutboundItineraryLegs']:
     for pricing_option in outbound['PricingOptions']:
@@ -98,35 +84,15 @@ for outbound in data['OutboundItineraryLegs']:
             for inbound_single in inbound_singles:
                 in_price = get_price(inbound_single[1])
                 price = out_price + in_price
-                if (args.details):
-                    print json.dumps(dict(
-                        outbound=leg_detail_dict(outbound),
-                        inbound=leg_detail_dict(inbound),
-                        price='%.2f' % price))
-                else:
-                    print '%s %s %s' % (outbound['Id'], 
-                                        inbound_single[0]['Id'], 
-                                        out_price + in_price)
+                reporter.report(outbound, inbound, price)
                 test_min_price(price)
         # Do outbound only and constrained returns
         else:
-            if (args.details):
-                details = {}
-                details['outbound'] = leg_detail_dict(outbound)
-            else:
-                print outbound['Id'],
+            inbound = None
             if (args.return_date):
                 inbound = inbounds[pricing_option['OpposingLegId']]
-                if (args.details):
-                    details['inbound'] = leg_detail_dict(inbound)
-                else:
-                    print ' %s' % inbound['Id'],
             price = get_price(pricing_option)
-            if (args.details):
-                details['price'] = '%.2f' % price
-                print json.dumps(details)
-            else:
-                print ' %s' % price
+            reporter.report(outbound, inbound, price)
             test_min_price(price)
 
 if (args.lowest):
