@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
 import argparse
-import pika
 import urllib
 import re
 import json
@@ -10,9 +9,15 @@ arg_parser = argparse.ArgumentParser(description='Get flight info.')
 arg_parser.add_argument('from_airport', help='From airport')
 arg_parser.add_argument('to_airport', help='To airport')
 arg_parser.add_argument('depart_date', 
-    help='Date of departure as YYMMDD')
+                        help='Date of departure as YYMMDD')
 arg_parser.add_argument('return_date', help='Return date as YYMMDD', 
-    nargs='?')
+                        nargs='?')
+arg_parser.add_argument('--details', action='store_true', 
+                        help='Show flight details as JSON')
+arg_parser.add_argument('--lowest', action='store_true', 
+                        help='Show lowest price at end of output. '
+                        'Useful for validation by cross referencing '
+                        'with Skyscanner website.')
 args = arg_parser.parse_args()
 
 session_key_url = 'http://www.skyscanner.net/flights/{}/{}/{}/'.format(
@@ -31,7 +36,6 @@ data = json.load(data_file)
 
 # A dict of incoming and outgoing legs and quotes by their ids will be 
 # easiest to work with.
-
 def dictify(things):
     output = {}
     for thing in things:
@@ -41,63 +45,91 @@ def dictify(things):
 inbounds = dictify(data['InboundItineraryLegs'])
 outbounds = dictify(data['OutboundItineraryLegs'])
 quotes = dictify(data['Quotes'])
+stations = dictify(data['Stations'])
+carriers = dictify(data['Carriers'])
 
+# Calculating prices will need to be done a few times
+def get_price(pricing_option):
+    price = 0
+    # Multiple quotes means multipart booking, sum up
+    for quote_id in pricing_option['QuoteIds']:
+        quote = quotes[quote_id]
+        price += float(quote['Price'])
+    return price
+
+def leg_detail_dict(leg):
+    output = {}
+    output['depart'] = leg['DepartureDateTime']
+    output['arrive'] = leg['ArrivalDateTime']
+    output['carriers'] = []
+    global carriers
+    for carrier in leg['MarketingCarrierIds']:
+        output['carriers'].append(carriers[carrier]['Name'])
+    # Some results have StopsCount > 0 but still no StopIds, weird
+    if (leg['StopsCount'] and 'StopIds' in leg):
+        output['stops'] = []
+        global stations
+        for stop in leg['StopIds']:
+            output['stops'].append(stations[stop]['Name'])
+    return output
+
+# Figuring if it's the min price can be done a lot
 min_price = None
+def test_min_price(candidate):
+    global min_price
+    if (not min_price or candidate < min_price):
+        min_price = candidate
+
+inbound_singles = []
 if (args.return_date):
-    # Reporting for return flights
-    # Loop over outbound, match their price options with inbound
-    # Some legs are singles and need to be cross multiplied manually
-    outbound_singles = []
-    for outbound in data['OutboundItineraryLegs']:
-        for pricing_option in outbound['PricingOptions']:
+    # Collect inbound singles for crossing with outbound singles
+    for inbound in data['InboundItineraryLegs']:
+        for pricing_option in inbound['PricingOptions']:
             if ('OpposingLegId' not in pricing_option):
-                outbound_singles.append([outbound, pricing_option])
-                continue
-            inbound = inbounds[pricing_option['OpposingLegId']]
-            # Multiple quotes means multipart booking, sum up
-            price = 0
-            for quote_id in pricing_option['QuoteIds']:
-                quote = quotes[quote_id]
-                price += float(quote['Price'])
-            print '{} {} {}'.format(outbound['Id'], inbound['Id'], 
-                                    price)
-            if (not min_price or price < min_price):
-                min_price = price
+                inbound_singles.append([inbound, pricing_option])
 
-    # If there are any outbound singles, cross multiply them with 
-    # inbound ones.
-    if (len(outbound_singles)):
-        for inbound in data['InboundItineraryLegs']:
-            for pricing_option in inbound['PricingOptions']:
-                if ('OpposingLegId' not in pricing_option):
-                    in_price = 0
-                    for in_quote_id in pricing_option['QuoteIds']:
-                        in_quote = quotes[in_quote_id]
-                        in_price += float(in_quote['Price'])
-                    for outbound_single in outbound_singles:
-                        out_price = 0
-                        q_ids = outbound_single[1]['QuoteIds']
-                        for out_quote_id in q_ids:
-                            out_quote = quotes[out_quote_id]
-                            out_price += float(out_quote['Price'])
-                        price = out_price + in_price
-                        print '{} {} {}'.format(
-                                    outbound_single[0]['Id'], 
-                                    inbound['Id'], out_price + in_price)
-                        if (not min_price or price < min_price):
-                            min_price = price
+# Reporting for return flights
+# Loop over outbound, match their price options with inbound
+for outbound in data['OutboundItineraryLegs']:
+    for pricing_option in outbound['PricingOptions']:
+        # Some legs are singles and need to be cross multiplied manually
+        if ('OpposingLegId' not in pricing_option and args.return_date):
+            out_price = get_price(pricing_option)
+            for inbound_single in inbound_singles:
+                in_price = get_price(inbound_single[1])
+                price = out_price + in_price
+                if (args.details):
+                    print json.dumps(dict(
+                        outbound=leg_detail_dict(outbound),
+                        inbound=leg_detail_dict(inbound),
+                        price='%.2f' % price))
+                else:
+                    print '%s %s %s' % (outbound['Id'], 
+                                        inbound_single[0]['Id'], 
+                                        out_price + in_price)
+                test_min_price(price)
+        # Do outbound only and constrained returns
+        else:
+            if (args.details):
+                details = {}
+                details['outbound'] = leg_detail_dict(outbound)
+            else:
+                print outbound['Id'],
+            if (args.return_date):
+                inbound = inbounds[pricing_option['OpposingLegId']]
+                if (args.details):
+                    details['inbound'] = leg_detail_dict(inbound)
+                else:
+                    print ' %s' % inbound['Id'],
+            price = get_price(pricing_option)
+            if (args.details):
+                details['price'] = '%.2f' % price
+                print json.dumps(details)
+            else:
+                print ' %s' % price
+            test_min_price(price)
 
-else:
-    # Handle one way journeys
-    for outbound in data['OutboundItineraryLegs']:
-        for pricing_option in outbound['PricingOptions']:
-            price = 0
-            for quote_id in pricing_option['QuoteIds']:
-                quote = quotes[quote_id]
-                price += float(quote['Price'])
-            print '{} {}'.format(outbound['Id'], price)
-            if (not min_price or price < min_price):
-                min_price = price
+if (args.lowest):
+    print '%.2f %s' % (min_price, 
+                       data['Query']['UserInfo']['CurrencyId'])
 
-print data['Query']['UserInfo']['CurrencyId']
-print min_price
